@@ -6,13 +6,18 @@ unlike a hand-rolled keyword router, the MODEL decides when to call this,
 via its own native function-calling interface (OpenAI/Anthropic-style
 tool schemas, or Ollama's tool support for models like qwen2.5 / llama3.1).
 """
-
+import pandas
 
 def calculate_noi(property_id: int, period: str, csv_path: str = "data/properties.csv") -> float:
     """Return revenue - operating_expenses for the given property_id and
     period, read directly from data/properties.csv. No model involved.
     """
-    raise NotImplementedError("Read properties.csv and compute NOI deterministically")
+
+    properties = pandas.read_csv(csv_path)
+    row = properties.loc[(properties['property_id'] == property_id) & (properties['period'] == period)]
+
+    return float(row.iloc[0]["revenue"] - row.iloc[0]["operating_expenses"])
+
 
 
 # A provider-agnostic description of this tool, in JSON-Schema-ish shape.

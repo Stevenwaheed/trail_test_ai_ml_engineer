@@ -4,7 +4,8 @@ uvicorn
 python-multipart
 
 # Add whichever embedding / model libraries you choose to use, e.g.:
-# sentence-transformers
+sentence-transformers
 # openai
 # anthropic
-# ollama
+ollama
+langchain-text-splitters
