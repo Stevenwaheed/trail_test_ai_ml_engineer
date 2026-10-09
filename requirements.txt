@@ -4,8 +4,10 @@ uvicorn
 python-multipart
 
 # Add whichever embedding / model libraries you choose to use, e.g.:
-sentence-transformers
-# openai
+# --extra-index-url https://download.pytorch.org/whl/cpu
+# sentence-transformers
+pandas
+openai
 # anthropic
 ollama
 langchain-text-splitters

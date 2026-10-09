@@ -294,15 +294,15 @@ def index() -> str:
 
 
 @app.post("/ask", response_class=HTMLResponse)
-def ask(user: str = Form(...), query: str = Form(...)) -> str:
+async def ask(user: str = Form(...), query: str = Form(...)) -> str:
     groups = TEST_USERS.get(user, [])
 
     try:
         # Imported here (rather than at module load) so the UI still starts
         # even before you've implemented answer_question().
-        from .generate import answer_question
+        from app.generate import answer_question
 
-        result = answer_question(query, groups)
+        result = await answer_question(query, groups)
         result_html = f"""
         <section class="card result">
           <div class="result-head">

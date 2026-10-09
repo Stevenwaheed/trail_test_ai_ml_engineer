@@ -10,7 +10,7 @@ build:
 	docker build -t $(IMAGE_NAME) .
 
 up: build
-	docker run --rm -it -p 5000:5000 -v "$(CURDIR)":/app $(ENV_FILE) $(IMAGE_NAME)
+	docker run --rm -it -p 5000:5000 -v "$(CURDIR)":/app -v $$HOME/.cache/huggingface:/root/.cache/huggingface $(ENV_FILE) $(IMAGE_NAME)
 
 test: build
-	docker run --rm -v "$(CURDIR)":/app $(ENV_FILE) $(IMAGE_NAME) pytest
+	docker run --rm -v "$(CURDIR)":/app -v $$HOME/.cache/huggingface:/root/.cache/huggingface $(ENV_FILE) $(IMAGE_NAME) pytest

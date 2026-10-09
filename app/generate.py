@@ -9,114 +9,78 @@ real behavior is.
 """
 
 import json
+import inspect
 from typing import List, Dict
-from openai import OpenAI
+from openai import AsyncOpenAI
 from .retrieval import retrieve, Chunk
-from .tools import calculate_noi, CALCULATE_NOI_TOOL_SCHEMA
+from .tools import calculate_noi, find_property, normalize_period, tools
 
 
-client = OpenAI()
-tools = [CALCULATE_NOI_TOOL_SCHEMA]
+client = AsyncOpenAI(base_url="http://host.docker.internal:11434/v1", api_key="ollama")
 
+SYSTEM_PROMPT = """
+You are a retrieval-grounded assistant for property and financial questions.
 
-
-SYSTEM_PROMPT="""
-You are a retrieval-grounded assistant.
-
-Your job is to answer the user's question using the authorized context chunks provided to you.
+You answer using two sources:
+1. Authorized context chunks, provided in the user's message under "CONTEXT".
+2. Tools, which you call to look up IDs, normalize periods, and calculate NOI.
 
 ## Grounding rules
 
-1. The provided context chunks are your authoritative source of information for answering the user's question.
-
-2. For normal questions, answer ONLY using information explicitly supported by the provided chunks.
-
-3. Do NOT use your general/world knowledge to fill in missing information. If the answer cannot be determined from the provided chunks, clearly say that the available context does not contain enough information to answer the question.
-
-4. Do NOT invent, assume, infer, or fabricate:
-   - facts
-   - numbers
-   - property information
-   - dates
-   - financial values
-   - names
-   - relationships between entities
-   - explanations that are not supported by the chunks
-
-5. When answering, use the most relevant chunks rather than attempting to use every chunk.
-
-6. If multiple chunks contain relevant information, combine them only when the information is consistent and supported by the chunks.
-
-7. If the chunks contain conflicting information, do not silently choose one. Explicitly mention the conflict and identify which chunks support the conflicting claims.
+1. Context chunks are your only source of facts. Answer ONLY from information explicitly stated in them or returned by a tool.
+2. Do NOT use general or world knowledge to fill gaps. If the context does not contain the answer, say what is missing.
+3. Do NOT invent or assume facts, numbers, dates, names, property details, financial values, or relationships between entities.
+4. Use the most relevant chunks; you do not need to use all of them.
+5. Combine chunks only when they are consistent. If chunks conflict, do not pick one silently: state the conflict and cite the chunks that support each side.
 
 ## Citations
 
-When answering from the retrieved context, cite the relevant chunk(s).
+- Each chunk in CONTEXT has an id, shown as [chunk_id].
+- Cite every fact taken from the context with its id, for example: "Revenue was $120,000 [3-1]."
+- Use only ids that appear in CONTEXT. Never invent an id.
+- Facts that come from a tool result are cited as (tool: tool_name), not as a chunk.
 
-Use the chunk identifiers supplied in the context. Do not invent citation identifiers.
+## Available tools
 
-Every factual claim that comes from the retrieved context should be traceable to one or more retrieved chunks.
+- `find_property(name_query)`: fuzzy-matches a property name and returns candidate property IDs.
+- `normalize_period(raw_period)`: converts a period such as "2026 q3" or "third quarter 2026" into the standard format, e.g. "Q3-2026".
+- `calculate_noi(property_id, period)`: returns the Net Operating Income for a property and period.
 
-## NOI calculation tool
+## When to use tools
 
-You have access to a `calculate_noi` tool.
+- Use `find_property` when you need a property ID and the user gave only a name. Do not guess IDs.
+- Use `normalize_period` when the user's period is not already in the form "Q3-2026". Always pass its output to `calculate_noi`.
+- Use `calculate_noi` for ANY question that asks for NOI. Never compute NOI yourself from revenue and expenses, never do the arithmetic, and never state an NOI value before the tool returns it. Do not modify the returned value.
+- Do NOT use tools for questions that are not about NOI (for example revenue, expenses, occupancy, lease terms). Answer those from the context chunks. A property ID or period from the chunks is only needed if a later NOI call requires it.
 
-Use the tool when the user's question requires calculating or retrieving Net Operating Income (NOI) for a property and period.
+## Calling tools in order
 
-Examples of questions that should generally require the tool:
+- Some calls depend on others: `calculate_noi` needs the `property_id` from `find_property` and the period from `normalize_period`. Wait for those results before calling it.
+- Independent calls, such as `find_property` and `normalize_period`, may be made together in the same turn.
+- You can make as many tool calls as you need, one round at a time, until you have everything required.
+- Do not repeat a call with the same arguments. Reuse the earlier result.
+- If a tool returns an error, read the message, fix the arguments, and retry once. If it still fails, tell the user what went wrong.
 
-- "What is the NOI for property 123 in 2026-Q1?"
-- "Calculate the NOI for property 10 for January."
-- "What was the property's NOI in Q2?"
-- "How much NOI did property X generate?"
+## Handling ambiguity and missing information
 
-Do NOT calculate NOI yourself from revenue and operating expenses.
+- If `find_property` returns several plausible matches and the user's name does not clearly identify one, ask the user which property they mean. Do not choose for them.
+- If `find_property` returns no match, say so.
+- If the property or period cannot be determined from the question, the context, or the tools, ask for the missing information instead of guessing.
 
-Do NOT perform the arithmetic yourself.
+## Final answer
 
-Do NOT state an NOI value before receiving the result from the `calculate_noi` tool.
+- Be concise and answer the question directly.
+- State the property name, period, and value so the answer is unambiguous.
+- Include citations as described above.
+- Do not describe your internal reasoning or the tool-calling steps unless the user asks.
 
-When the tool is required:
+## Example
 
-1. Identify the required `property_id` and `period` from the user's question and/or authorized context.
-2. Call `calculate_noi` with those values.
-3. Wait for the tool result.
-4. Use the tool result when producing the final answer.
-5. Do not independently recompute or modify the returned NOI value.
+User: "What is the NOI for Maple Ridge Apartments in 2026 q3?"
+Steps: call `find_property("Maple Ridge Apartments")` and `normalize_period("2026 q3")`, then call `calculate_noi` with the returned property_id and "Q3-2026", then answer with the tool's value.
 
-The `calculate_noi` tool is the authoritative source for the calculated NOI value.
-
-If the required property ID or period cannot be determined from the user's question and authorized context, do not guess. Ask the user for the missing information.
-
-## Important distinction
-
-The retrieved chunks are the source of factual context.
-
-The `calculate_noi` tool is the source of truth for NOI calculations.
-
-Do not substitute one for the other.
-
-For example, if the chunks contain:
-
-property_id=123
-period=2026-Q1
-revenue=100000
-operating_expenses=30000
-
-and the user asks for NOI, call the `calculate_noi` tool instead of answering "$70,000" yourself.
-
-## Final answer behavior
-
-Be concise and directly answer the user's question.
-
-If the question can be answered from the chunks, answer it using only supported information.
-
-If the question requires NOI, use the tool and then provide the tool's result in a natural response.
-
-If the necessary information is unavailable, say what information is missing rather than making an unsupported assumption.
-
-
-
+User: "What was Maple Ridge Apartments' total revenue in Q3 2026?"
+Steps: no NOI is requested, so answer from the context chunks with citations. If the chunks do not contain it, say the available context does not include that figure.
 """
 
 
@@ -146,6 +110,8 @@ Rules:
 
 7. If the answer contains no unsupported factual claims, return grounded=true.
 
+8. If the ANSWER is a refusal or states that it cannot answer based on the provided context, return grounded=true.
+
 Return ONLY valid JSON in this format:
 
 {
@@ -164,8 +130,14 @@ or:
 """
 
 
+TOOL_REGISTRY = {
+    "calculate_noi": calculate_noi,
+    "find_property": find_property,
+    "normalize_period": normalize_period,
+}
 
-def call_model(prompt: str, tools: list | None = None) -> Dict:
+
+async def call_model(prompt: str, tools: list | None = None) -> Dict:
     """Call your chosen real language model.
 
     Return a normalized dict shaped like:
@@ -190,68 +162,79 @@ def call_model(prompt: str, tools: list | None = None) -> Dict:
                     "content": prompt
                 },
             ]
+    executed = []
 
-    completion = client.chat.completions.create(
-        model="Qwen/Qwen3.5-27B",
-        messages=messages,
-        tools=tools,
-    )
-
-    message = completion.choices[0].message
-
-    # Model decided that no tool is necessary.
-    if not message.tool_calls:
-        answer = message.content
-
-        return {
-          "text": answer,
-          "tool_call": None,
-      }
-
-    # Model requested a tool.
-    tool_messages = []
-    tool_call = message.tool_calls[0]
-    
-    if tool_call.function.name != "calculate_noi":
-        raise ValueError(
-            f"Unknown tool requested: {tool_call.function.name}"
+    while True:
+        completion = await client.chat.completions.create(
+            model="glm-4.7-flash:latest",
+            messages=messages,
+            tools=tools,
         )
 
-    arguments = json.loads(tool_call.function.arguments)
+        message = completion.choices[0].message
+        if not message.tool_calls:
+            answer = message.content
 
-    result = calculate_noi(
-        property_id=arguments["property_id"],
-        period=arguments["period"],
-    )
+            return {
+                "text": answer,
+                "tool_call": executed[-1] if executed else None,
+                "tool_calls": executed
+            }
 
-    tool_messages.append(
-        {
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": json.dumps({
-                "noi": result
-            }),
-        }
-    )
+        tool_calls = message.tool_calls
 
-    messages.append(message)
-    messages.extend(tool_messages)
 
-    final_completion = client.chat.completions.create(
-        model="Qwen/Qwen3.5-27B",
-        messages=messages,
-        tools=tools,
-    )
+        messages.append(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments,
+                        },
+                    }
+                    for tc in message.tool_calls
+                ],
+                "content": message.content or "",
+            }
+        )
+        
+        for tool_call in tool_calls:
+            arguments = json.loads(tool_call.function.arguments)
+            name = tool_call.function.name
 
-    final_message = final_completion.choices[0].message
+            func = TOOL_REGISTRY.get(name)
+            if func is None:
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps({"error": f"Unknown tool: '{name}'. Did you misspell it?"}),
+                })
+                continue
+            if inspect.iscoroutinefunction(func):
+                result = await func(**arguments)
+            else:
+                result = func(**arguments)
+
+            executed.append({"name": name, "arguments": arguments})
+
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "content": json.dumps({"result": result}),
+            })
 
     return {
-        "text": final_message.content,
-        "tool_call": {"name": tool_call.function.name, "arguments": arguments},
+        "text": "Stopped: too many tool-calling steps.",
+        "tool_call": executed[-1] if executed else None,
+        "tool_calls": executed,
     }
 
 
-def is_grounded(answer: str, chunks: List[Chunk]) -> bool:
+async def is_grounded(answer: str, chunks: List[Chunk]) -> bool:
     """Task 1 grounding check: verify the answer's key claims (names,
     numbers, dates) actually appear in the retrieved chunks it was
     supposedly based on. A simple substring/entity check is enough -- it
@@ -266,21 +249,21 @@ def is_grounded(answer: str, chunks: List[Chunk]) -> bool:
         {
             "role": "user",
             "content": f"""
-      CONTEXT:
-      <context>
-      {chunks}
-      </context>
+                    CONTEXT:
+                        <context>
+                            {[{'id': c.doc_id, 'text': c.text} for c in chunks]}
+                        </context>
 
-      ANSWER:
-      <answer>
-      {answer}
-      </answer>
-      """,
+                    ANSWER:
+                        <answer>
+                            {answer}
+                        </answer>
+                """,
               },
           ]
 
-    completion = client.chat.completions.create(
-        model="Qwen/Qwen3.5-27B",
+    completion = await client.chat.completions.create(
+        model="glm-4.7-flash:latest",
         messages=messages,
         temperature=0,
     )
@@ -295,7 +278,7 @@ def is_grounded(answer: str, chunks: List[Chunk]) -> bool:
     return result.get("grounded", False) is True 
 
 
-def answer_question(query: str, user_groups: List[str]) -> Dict:
+async def answer_question(query: str, user_groups: List[str]) -> Dict:
     """Orchestration for both tasks:
 
     - Retrieve authorized context for the query via retrieve().
@@ -314,14 +297,25 @@ def answer_question(query: str, user_groups: List[str]) -> Dict:
     """
 
 
-    chunks = retrieve(query, user_groups)
-    prompt = f" Authorized context: {chunks} \n User question:{query}"
-    response = call_model(prompt, tools)
+    chunks = await retrieve(query, user_groups)
     
+    context_str = "\\n".join([f"[{c.doc_id}] {c.text}" for c in chunks])
+    prompt = f" Authorized context: {context_str} \\n User question:{query}"
+    response = await call_model(prompt, tools)
+    
+    text = response['text']
+    import re
+    cited_ids = set()
+    for match in re.finditer(r'\[(.*?)\]', text):
+        pieces = re.split(r'[,\s]+', match.group(1))
+        cited_ids.update(pieces)
+        
+    cited_chunks = [c for c in chunks if str(c.doc_id) in cited_ids]
+    formatted_citations = [f"[{c.doc_id}] {c.text}" for c in cited_chunks]
 
     return {
-          "answer": response['text'],
-          "citations": chunks,
-          "grounded": is_grounded(response['text'], chunks),
-          "used_tool": response['tool_called'] != None
+          "answer": text,
+          "citations": formatted_citations,
+          "grounded": await is_grounded(text, cited_chunks),
+          "used_tool": response['tool_call'] != None
          }

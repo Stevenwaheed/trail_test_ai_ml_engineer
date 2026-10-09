@@ -15,14 +15,14 @@ from dataclasses import dataclass, field
 from typing import List
 from pathlib import Path
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from sentence_transformers import SentenceTransformer
 import json
+from openai import AsyncOpenAI
+from .tools import tools
+import numpy as np
 
+client = AsyncOpenAI(base_url="http://host.docker.internal:11434/v1", api_key="ollama")
 
-embedding_model = SentenceTransformer("Qwen/Qwen3-Embedding-0.6B")
-
-
-acl = json.load('documents/manifest.json')
+# acl = json.load('documents/manifest.json')
 acl = open('documents/manifest.json')
 acl_json = json.loads(acl.read())
 
@@ -36,43 +36,48 @@ class Chunk:
     score: float = 0.0
 
 
-def load_documents(documents_dir: str = "documents") -> List[Chunk]:
-    """Load and chunk all documents, attaching ACL metadata from manifest.json.
-
-    Embeddings should be computed here (or lazily) using a real embedding
-    model. Paragraph-level chunking is fine given how short these documents
-    are.
-    """
-
+async def load_documents(
+    documents_dir: str = "documents",
+) -> List[Chunk]:
     directory = Path(documents_dir)
+    files = sorted(directory.glob("*.txt"))
 
-    files = list(directory.glob('*.txt'))
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=300,
+        chunk_overlap=30,
+        separators=["\n\n", "\n", " "],
+    )
 
-    chuncks = []
+    chunks = []
 
-    for id, file in enumerate(files):
-
+    for doc_id, file in enumerate(files):
         acl_file = acl_json[file.name]
-        with open(file, 'r') as f:
-            text = f.read()
 
-            splitter = RecursiveCharacterTextSplitter(chunk_size=10, chunck_overlap=5)
-            texts = splitter.split_text(text)
+        text = file.read_text(encoding="utf-8")
+        texts = splitter.split_text(text)
 
-            document_embeddings = embedding_model.encode(texts)
+        for chunk_text in texts:
+            chunks.append(
+                Chunk(
+                    doc_id=doc_id,
+                    text=chunk_text,
+                    embedding=[], 
+                    acl=acl_file["acl"],
+                )
+            )
 
-            for text, embedding in zip(texts, document_embeddings):
+    if not chunks:
+        return []
 
-                chuncks.append(
-                    Chunk(
-                    doc_id=id,
-                    text=texts,
-                    embedding=embedding,
-                    acl=acl_file['acl'],
-                ))
+    response = await client.embeddings.create(
+        model="nomic-embed-text",
+        input=[chunk.text for chunk in chunks],
+    )
 
+    for item in response.data:
+        chunks[item.index].embedding = item.embedding
 
-    raise chuncks
+    return chunks
 
 
 def is_authorized(chunk_acl: List[str], user_groups: List[str]) -> bool:
@@ -82,20 +87,37 @@ def is_authorized(chunk_acl: List[str], user_groups: List[str]) -> bool:
     return 'all' in chunk_acl or any(group in chunk_acl for group in user_groups)
 
 
-chunks = load_documents("documents")
+_chunks_cache = None
 
-def retrieve(query: str, user_groups: List[str], top_k: int = 3) -> List[Chunk]:
+async def retrieve(query: str, user_groups: List[str], top_k: int = 3) -> List[Chunk]:
     """Return only chunks the given user_groups are authorized to see,
     ranked by embedding similarity to `query`.
     """
+    global _chunks_cache
+    if _chunks_cache is None:
+        _chunks_cache = await load_documents("documents")
 
-    for chunk in chunks:
+    query_embeddings = await client.embeddings.create(
+        model="nomic-embed-text",
+        input=query,
+    )
+    
+    query_vec = np.array(query_embeddings.data[0].embedding)
+    query_vec = query_vec / np.linalg.norm(query_vec)
+    
+    scored_chunks = []
+    for chunk in _chunks_cache:
         if not is_authorized(chunk.acl, user_groups):
             continue
 
-    query_embeddings = embedding_model.encode(query)
+        chunk_vec = np.array(chunk.embedding)
+        chunk_vec = chunk_vec / np.linalg.norm(chunk_vec)
 
-    similarity = embedding_model.similarity(query_embeddings, chunks.embedding)
-    sorted_chunks = sorted(chunks, key=lambda x: similarity[x], reverse=True)
+        sim = float(query_vec @ chunk_vec)  # cosine similarity
+        if sim < 0.55:
+            continue
+        chunk.score = sim
+        scored_chunks.append(chunk)
 
-    raise sorted_chunks
+    scored_chunks.sort(key=lambda x: x.score, reverse=True)
+    return [chunk for chunk in scored_chunks[:top_k]]

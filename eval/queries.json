@@ -1,6 +1,6 @@
 [
   {"id": "q1", "user": "user_a", "query": "What was Maple Ridge Apartments' total revenue in Q3 2026?"},
-  {"id": "q2", "user": "user_b", "query": "When was the HVAC at Maple Ridge Apartments Unit 4B last repaired?"},
+  {"id": "q2", "user": "user_b", "query": "Whe was the HVAC at Maple Ridge Apartments Unit 4B last repairedn?"},
   {"id": "q3", "user": "user_c", "query": "What is the office holiday policy for 2026?"},
   {"id": "q4", "user": "user_a", "query": "What is the NOI for Oak Hill Plaza in Q3 2026?"},
   {"id": "q5", "user": "user_b", "query": "What is the security deposit amount for the Oak Hill Plaza Unit 12 lease renewal?"}
